@@ -1,0 +1,618 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#2b5fd9">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<title>PDF ke Word</title>
+<style>
+  :root { --bg:#f4f6fb; --card:#fff; --text:#1c2333; --muted:#6b7385; --brand:#2b5fd9; --ok:#1f9d55; --err:#d33; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12151d; --card:#1c212d; --text:#e8ebf2; --muted:#98a0b3; --brand:#5b8cff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width: 520px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  p.sub { margin: 0 0 20px; color: var(--muted); font-size: .92rem; }
+  .card { background: var(--card); border-radius: 14px; padding: 18px; margin-bottom: 14px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  label.pick { display:block; border:2px dashed var(--brand); border-radius:12px; padding:28px 12px; text-align:center; color:var(--brand); font-weight:600; cursor:pointer; }
+  input[type=file] { display:none; }
+  #fname { margin-top:10px; font-size:.9rem; color:var(--muted); word-break: break-all; }
+  button { width:100%; padding:14px; border:0; border-radius:10px; background:var(--brand); color:#fff; font-size:1rem; font-weight:600; margin-top:14px; }
+  button:disabled { opacity:.45; }
+  progress { width:100%; height:10px; margin-top:14px; display:none; }
+  #status { margin-top:12px; font-size:.92rem; min-height:1.2em; }
+  .ok { color: var(--ok); } .err { color: var(--err); }
+  a.dl { display:none; margin-top:12px; text-align:center; padding:14px; border-radius:10px; background:var(--ok); color:#fff; font-weight:600; text-decoration:none; }
+  #net { font-size:.8rem; color:var(--muted); text-align:center; margin-top:18px; }
+  #install { display:none; background:transparent; color:var(--brand); border:1px solid var(--brand); }
+  .note { font-size:.82rem; color:var(--muted); line-height:1.5; }
+  .modes { margin-top:14px; display:grid; gap:8px; }
+  .modes label { display:flex; gap:10px; align-items:flex-start; padding:10px 12px; border:1px solid var(--muted); border-radius:10px; font-size:.92rem; cursor:pointer; }
+  .modes input { margin-top:4px; accent-color: var(--brand); }
+  .modes small { color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>PDF ke Word</h1>
+  <p class="sub">Konversi langsung di HP kamu. File tidak dikirim ke server mana pun.</p>
+
+  <div class="card">
+    <label class="pick" for="file">Pilih file PDF</label>
+    <input id="file" type="file" accept="application/pdf,.pdf">
+    <div id="fname">Belum ada file dipilih</div>
+    <div class="modes">
+      <label><input type="radio" name="mode" value="hybrid" checked>
+        <span><b>Tampilan persis + teks bisa diedit</b><br><small>Teks jadi teks asli dan foto jadi gambar tersendiri (bisa diganti). Desain jadi latar. Percobaan: posisi dan font bisa sedikit beda.</small></span></label>
+      <label><input type="radio" name="mode" value="image">
+        <span><b>Gambar saja</b><br><small>Sama persis dengan PDF, tapi teks berupa gambar dan tidak bisa diedit.</small></span></label>
+      <label><input type="radio" name="mode" value="text">
+        <span><b>Teks saja</b><br><small>Judul dan paragraf bisa diedit. Foto dan desain tidak ikut.</small></span></label>
+    </div>
+    <button id="go" disabled>Konversi ke Word</button>
+    <progress id="bar" value="0" max="100"></progress>
+    <div id="status"></div>
+    <a id="dl" class="dl" download>Unduh file Word</a>
+  </div>
+
+  <div class="card note">
+    <b>Tampilan persis + teks bisa diedit</b> cocok untuk CV dan PDF ber-desain. Hasil paling rapi saat dibuka di Word versi komputer. Font bisa berbeda dari aslinya dan teks yang panjang bisa sedikit bergeser. <b>Gambar saja</b> paling mirip aslinya (termasuk PDF scan) tapi tidak bisa diedit. <b>Teks saja</b> bisa diedit tapi foto dan desain tidak ikut.
+  </div>
+
+  <button id="install">Pasang ke layar utama</button>
+  <div id="net"></div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/docx@9.0.3/build/index.umd.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const fileInput = $('file'), goBtn = $('go'), bar = $('bar'), statusEl = $('status'), dl = $('dl');
+let currentFile = null;
+
+function setStatus(msg, cls) { statusEl.textContent = msg; statusEl.className = cls || ''; }
+
+fileInput.addEventListener('change', () => {
+  currentFile = fileInput.files[0] || null;
+  $('fname').textContent = currentFile ? currentFile.name : 'Belum ada file dipilih';
+  goBtn.disabled = !currentFile;
+  dl.style.display = 'none';
+  setStatus('');
+});
+
+goBtn.addEventListener('click', async () => {
+  const missing = [];
+  if (!window.pdfjsLib) missing.push('pembaca PDF');
+  if (!window.docx) missing.push('pembuat Word');
+  if (missing.length) {
+    setStatus('Library belum termuat (' + missing.join(', ') + '). Muat ulang halaman dengan internet aktif, lalu coba lagi.', 'err');
+    return;
+  }
+  goBtn.disabled = true; dl.style.display = 'none';
+  bar.style.display = 'block'; bar.value = 0;
+  try {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    const data = new Uint8Array(await currentFile.arrayBuffer());
+    const pdf = await pdfjsLib.getDocument({ data }).promise;
+
+    const mode = document.querySelector('input[name=mode]:checked').value;
+    if (mode === 'hybrid' || mode === 'image') {
+      const blob = mode === 'hybrid' ? await makeHybridDocx(pdf) : await makeImageDocx(pdf);
+      showResult(blob);
+      return;
+    }
+
+    const pages = [];
+    for (let p = 1; p <= pdf.numPages; p++) {
+      setStatus(`Membaca halaman ${p} dari ${pdf.numPages}...`);
+      const page = await pdf.getPage(p);
+      const tc = await page.getTextContent();
+      pages.push(extractLines(tc.items));
+      bar.value = Math.round((p / pdf.numPages) * 80);
+      await new Promise(r => setTimeout(r)); // beri napas ke UI
+    }
+
+    const totalChars = pages.flat().reduce((n, l) => n + l.text.length, 0);
+    if (totalChars < 20) {
+      setStatus('Tidak ada teks yang bisa dibaca. Kemungkinan PDF ini hasil scan.', 'err');
+      bar.style.display = 'none'; goBtn.disabled = false;
+      return;
+    }
+
+    setStatus('Menyusun dokumen Word...');
+    const blocks = buildBlocks(pages);
+    const blob = await makeDocx(blocks);
+    showResult(blob);
+  } catch (e) {
+    console.error(e);
+    setStatus('Gagal konversi: ' + (e.message || e), 'err');
+  } finally {
+    goBtn.disabled = false;
+    setTimeout(() => { bar.style.display = 'none'; }, 600);
+  }
+});
+
+function showResult(blob) {
+  bar.value = 100;
+  dl.href = URL.createObjectURL(blob);
+  dl.download = currentFile.name.replace(/\.pdf$/i, '') + '.docx';
+  dl.style.display = 'block';
+  setStatus('Selesai! File Word siap diunduh.', 'ok');
+}
+
+// Mode "Tampilan persis": tiap halaman PDF dirender jadi gambar,
+// lalu dipasang sebagai latar satu halaman Word penuh.
+async function makeImageDocx(pdf) {
+  const { Document, Packer, Paragraph, ImageRun,
+          HorizontalPositionRelativeFrom, VerticalPositionRelativeFrom } = docx;
+  const SCALE = 2; // kualitas render (2 = tajam, ukuran file wajar)
+  const sections = [];
+
+  for (let p = 1; p <= pdf.numPages; p++) {
+    setStatus(`Merender halaman ${p} dari ${pdf.numPages}...`);
+    const page = await pdf.getPage(p);
+    const base = page.getViewport({ scale: 1 });        // ukuran asli (poin)
+    const vp = page.getViewport({ scale: SCALE });
+
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.floor(vp.width);
+    canvas.height = Math.floor(vp.height);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+
+    const jpg = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.92));
+    const bytes = new Uint8Array(await jpg.arrayBuffer());
+    canvas.width = canvas.height = 0; // lepaskan memori
+
+    const wPx = Math.round(base.width * 96 / 72);
+    const hPx = Math.round(base.height * 96 / 72);
+
+    sections.push({
+      properties: {
+        page: {
+          size: { width: Math.round(base.width * 20), height: Math.round(base.height * 20) },
+          margin: { top: 0, right: 0, bottom: 0, left: 0, header: 0, footer: 0 }
+        }
+      },
+      children: [new Paragraph({
+        children: [new ImageRun({
+          type: 'jpg',
+          data: bytes,
+          transformation: { width: wPx, height: hPx },
+          floating: {
+            horizontalPosition: { relative: HorizontalPositionRelativeFrom.PAGE, offset: 0 },
+            verticalPosition: { relative: VerticalPositionRelativeFrom.PAGE, offset: 0 },
+            behindDocument: true
+          }
+        })]
+      })]
+    });
+
+    bar.value = Math.round((p / pdf.numPages) * 90);
+    await new Promise(r => setTimeout(r));
+  }
+
+  setStatus('Menyusun dokumen Word...');
+  return Packer.toBlob(new Document({ sections }));
+}
+
+// ---------- Mode hibrida: latar gambar (tanpa teks) + teks asli di atasnya ----------
+
+// Pecah isi halaman menjadi potongan teks lengkap dengan posisi (satuan poin, y ke bawah)
+function extractSegments(items, baseTransform) {
+  const toks = [];
+  for (const i of items) {
+    if (i.str === undefined || i.str === '') continue;
+    const m = pdfjsLib.Util.transform(baseTransform, i.transform);
+    toks.push({ s: i.str, x: m[4], y: m[5], size: Math.hypot(m[0], m[1]) || i.height || 10, w: i.width });
+  }
+  toks.sort((a, b) => a.y - b.y);
+  const rows = [];
+  for (const t of toks) {
+    const r = rows[rows.length - 1];
+    if (r && Math.abs(r.y - t.y) < Math.max(r.size, t.size) * 0.4) r.items.push(t);
+    else rows.push({ y: t.y, size: t.size, items: [t] });
+  }
+  const segs = [];
+  for (const r of rows) {
+    r.items.sort((a, b) => a.x - b.x);
+    let cur = null;
+    for (const t of r.items) {
+      const gap = cur ? t.x - cur.endX : 0;
+      if (cur && gap < t.size * 1.2 && gap > -t.size * 0.5) {
+        const sp = gap > t.size * 0.15 && !/\s$/.test(cur.text) && !/^\s/.test(t.s);
+        cur.text += (sp ? ' ' : '') + t.s;
+        cur.endX = Math.max(cur.endX, t.x + t.w);
+        cur.size = Math.max(cur.size, t.size);
+      } else {
+        if (cur) segs.push(cur);
+        cur = { text: t.s, x: t.x, y: t.y, endX: t.x + t.w, size: t.size };
+      }
+    }
+    if (cur) segs.push(cur);
+  }
+  return segs.filter(s => s.text.trim());
+}
+
+const hex2 = n => n.toString(16).padStart(2, '0').toUpperCase();
+
+// Baca warna teks dengan membandingkan render berteks (xT) dan tanpa teks (xB).
+// Mengembalikan null kalau teks ternyata tidak hilang dari render tanpa teks.
+function sampleColor(xT, xB, b) {
+  const w = b.x1 - b.x0, h = b.y1 - b.y0;
+  if (w < 1 || h < 1) return null;
+  const a = xT.getImageData(b.x0, b.y0, w, h).data;
+  const c = xB.getImageData(b.x0, b.y0, w, h).data;
+  const diffs = new Uint16Array(w * h);
+  let max = 0;
+  for (let i = 0, p = 0; i < a.length; i += 4, p++) {
+    const d = Math.abs(a[i] - c[i]) + Math.abs(a[i + 1] - c[i + 1]) + Math.abs(a[i + 2] - c[i + 2]);
+    diffs[p] = d; if (d > max) max = d;
+  }
+  if (max < 60) return null;
+  const thr = max * 0.7;
+  let r = 0, g = 0, bl = 0, n = 0;
+  for (let i = 0, p = 0; i < a.length; i += 4, p++) {
+    if (diffs[p] >= thr) { r += a[i]; g += a[i + 1]; bl += a[i + 2]; n++; }
+  }
+  return n ? hex2(Math.round(r / n)) + hex2(Math.round(g / n)) + hex2(Math.round(bl / n)) : null;
+}
+
+// Cadangan: kalau teks masih ada di latar, tutup dengan warna sekitarnya
+function eraseAndPickColor(ctx, b) {
+  const px = Math.max(0, b.x0 - 3);
+  const py = Math.min(ctx.canvas.height - 1, Math.floor((b.y0 + b.y1) / 2));
+  const d = ctx.getImageData(px, py, 1, 1).data;
+  ctx.fillStyle = `rgb(${d[0]},${d[1]},${d[2]})`;
+  ctx.fillRect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0);
+  const lum = 0.299 * d[0] + 0.587 * d[1] + 0.114 * d[2];
+  return lum > 140 ? '000000' : 'FFFFFF';
+}
+
+const patchText = ctx => { ctx.fillText = () => {}; ctx.strokeText = () => {}; };
+
+// Lewati gambar yang kotak tempelnya sama dengan salah satu foto (supaya foto tidak masuk latar)
+function patchPhotos(ctx, boxes) {
+  const orig = CanvasRenderingContext2D.prototype.drawImage;
+  ctx.drawImage = function (img, ...a) {
+    let dx, dy, dw, dh;
+    if (a.length >= 8) [dx, dy, dw, dh] = a.slice(4, 8);
+    else if (a.length >= 4) [dx, dy, dw, dh] = a;
+    else { dx = a[0]; dy = a[1]; dw = img.width; dh = img.height; }
+    const m = ctx.getTransform();
+    const xs = [], ys = [];
+    for (const [px, py] of [[dx, dy], [dx + dw, dy], [dx, dy + dh], [dx + dw, dy + dh]]) {
+      xs.push(m.a * px + m.c * py + m.e);
+      ys.push(m.b * px + m.d * py + m.f);
+    }
+    const X0 = Math.min(...xs), X1 = Math.max(...xs), Y0 = Math.min(...ys), Y1 = Math.max(...ys);
+    for (const b of boxes) {
+      if (Math.abs(X0 - b.x0) < 5 && Math.abs(X1 - b.x1) < 5 && Math.abs(Y0 - b.y0) < 5 && Math.abs(Y1 - b.y1) < 5) return;
+    }
+    return orig.call(ctx, img, ...a);
+  };
+}
+
+function getObj(page, name) {
+  const store = String(name).startsWith('g_') ? page.commonObjs : page.objs;
+  return new Promise(res => {
+    const t = setTimeout(() => res(null), 3000);
+    try { store.get(name, o => { clearTimeout(t); res(o); }); } catch (e) { clearTimeout(t); res(null); }
+  });
+}
+
+// Ubah data gambar dari pdf.js menjadi canvas
+function imageToCanvas(img) {
+  const w = img.width, h = img.height;
+  if (!w || !h) return null;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const x = c.getContext('2d');
+  if (img.bitmap) { x.drawImage(img.bitmap, 0, 0); return c; }
+  const d = img.data;
+  if (!d) return null;
+  const id = x.createImageData(w, h);
+  if (d.length === w * h * 4) id.data.set(d);
+  else if (d.length === w * h * 3) {
+    for (let i = 0, j = 0; i < d.length; i += 3, j += 4) {
+      id.data[j] = d[i]; id.data[j + 1] = d[i + 1]; id.data[j + 2] = d[i + 2]; id.data[j + 3] = 255;
+    }
+  } else return null;
+  x.putImageData(id, 0, 0);
+  return c;
+}
+
+// Cari foto/gambar yang disisipkan di halaman beserta posisinya (satuan poin)
+async function collectPhotos(page, base) {
+  const OPS = pdfjsLib.OPS, T = pdfjsLib.Util.transform;
+  let list;
+  try { list = await page.getOperatorList(); } catch (e) { return []; }
+  const photos = [];
+  let ctm = base.transform;
+  const stack = [];
+  for (let i = 0; i < list.fnArray.length && photos.length < 30; i++) {
+    const fn = list.fnArray[i], args = list.argsArray[i];
+    if (fn === OPS.save) stack.push(ctm);
+    else if (fn === OPS.restore) { if (stack.length) ctm = stack.pop(); }
+    else if (fn === OPS.transform) ctm = T(ctm, args);
+    else if (fn === OPS.paintFormXObjectBegin) { stack.push(ctm); if (args[0]) ctm = T(ctm, args[0]); }
+    else if (fn === OPS.paintFormXObjectEnd) { if (stack.length) ctm = stack.pop(); }
+    else if (fn === OPS.paintImageXObject || fn === OPS.paintInlineImageXObject) {
+      const upright = Math.abs(ctm[1]) < 0.01 && Math.abs(ctm[2]) < 0.01 && ctm[0] > 0 && ctm[3] < 0;
+      if (!upright) continue;
+      const x0 = ctm[4], x1 = ctm[4] + ctm[0], y0 = ctm[5] + ctm[3], y1 = ctm[5];
+      if (x1 - x0 < 6 || y1 - y0 < 6) continue;
+      const img = fn === OPS.paintInlineImageXObject ? args[0] : await getObj(page, args[0]);
+      const src = img && imageToCanvas(img);
+      if (src) photos.push({ b: { x0, y0, x1, y1 }, src });
+    }
+  }
+  return photos;
+}
+
+// Bagian foto yang benar-benar tampak: beda antara render dengan foto (xP) dan tanpa foto (xB)
+function visibleBox(xP, xB, b) {
+  const w = b.x1 - b.x0, h = b.y1 - b.y0;
+  if (w < 1 || h < 1) return null;
+  const a = xP.getImageData(b.x0, b.y0, w, h).data;
+  const c = xB.getImageData(b.x0, b.y0, w, h).data;
+  let minX = w, minY = h, maxX = -1, maxY = -1;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      const d = Math.abs(a[i] - c[i]) + Math.abs(a[i + 1] - c[i + 1]) + Math.abs(a[i + 2] - c[i + 2]);
+      if (d > 45) {
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < 0) return null;
+  return { x0: b.x0 + minX, y0: b.y0 + minY, x1: b.x0 + maxX + 1, y1: b.y0 + maxY + 1 };
+}
+
+// Potong gambar asli sesuai bagian yang tampak, kecilkan bila terlalu besar, lalu simpan sebagai JPG/PNG
+async function cropEncode(src, f, maxSide) {
+  const sw = src.width, sh = src.height;
+  const sx = Math.round(f[0] * sw), sy = Math.round(f[1] * sh);
+  const cw = Math.max(1, Math.round((f[2] - f[0]) * sw)), ch = Math.max(1, Math.round((f[3] - f[1]) * sh));
+  const k = Math.min(1, maxSide / Math.max(cw, ch));
+  const out = document.createElement('canvas');
+  out.width = Math.max(1, Math.round(cw * k));
+  out.height = Math.max(1, Math.round(ch * k));
+  const o = out.getContext('2d', { willReadFrequently: true });
+  o.drawImage(src, sx, sy, cw, ch, 0, 0, out.width, out.height);
+  const px = o.getImageData(0, 0, out.width, out.height).data;
+  let alpha = false;
+  for (let i = 3; i < px.length; i += 16) if (px[i] < 250) { alpha = true; break; }
+  const type = alpha ? 'png' : 'jpg';
+  const blob = await new Promise(res => out.toBlob(res, alpha ? 'image/png' : 'image/jpeg', 0.92));
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  out.width = out.height = 0;
+  return { bytes, type };
+}
+
+async function makeHybridDocx(pdf) {
+  const { Document, Packer, Paragraph, TextRun, ImageRun, FrameAnchorType, LineRuleType,
+          HorizontalPositionRelativeFrom, VerticalPositionRelativeFrom } = docx;
+  const S = 2;
+  const sections = [];
+
+  for (let p = 1; p <= pdf.numPages; p++) {
+    setStatus(`Memproses halaman ${p} dari ${pdf.numPages}...`);
+    const page = await pdf.getPage(p);
+    const base = page.getViewport({ scale: 1 });
+    const vp = page.getViewport({ scale: S });
+
+    const mk = () => {
+      const c = document.createElement('canvas');
+      c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
+      const x = c.getContext('2d', { willReadFrequently: true });
+      x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height);
+      return x;
+    };
+    const photos = await collectPhotos(page, base);
+    const photoBoxes = photos.map(ph => ({ x0: ph.b.x0 * S, y0: ph.b.y0 * S, x1: ph.b.x1 * S, y1: ph.b.y1 * S }));
+
+    const xT = mk();               // render lengkap (untuk membaca warna teks)
+    await page.render({ canvasContext: xT, viewport: vp }).promise;
+
+    let xP = null;                 // tanpa teks, foto masih ada (acuan warna teks & bentuk foto)
+    if (photos.length) {
+      xP = mk(); patchText(xP);
+      await page.render({ canvasContext: xP, viewport: vp }).promise;
+    }
+
+    const xB = mk();               // tanpa teks dan tanpa foto (jadi latar)
+    patchText(xB);
+    if (photos.length) patchPhotos(xB, photoBoxes);
+    await page.render({ canvasContext: xB, viewport: vp }).promise;
+    const ref = xP || xB;
+
+    const tc = await page.getTextContent();
+    const segs = extractSegments(tc.items, base.transform);
+    const cw = xB.canvas.width, ch = xB.canvas.height;
+    const pageWTw = Math.round(base.width * 20);
+    const frames = [];
+
+    for (const sg of segs) {
+      const size = Math.max(4, sg.size);
+      const box = {
+        x0: Math.max(0, Math.floor(sg.x * S - 1)),
+        y0: Math.max(0, Math.floor((sg.y - size * 0.9) * S)),
+        x1: Math.min(cw, Math.ceil(sg.endX * S + 1)),
+        y1: Math.min(ch, Math.ceil((sg.y + size * 0.25) * S))
+      };
+      const color = sampleColor(xT, ref, box) || eraseAndPickColor(xB, box);
+
+      const lineH = Math.round(size * 1.2 * 20);
+      const xTw = Math.max(0, Math.round(sg.x * 20));
+      let wTw = Math.round((sg.endX - sg.x) * 20 * 1.3 + 240);
+      if (xTw + wTw > pageWTw) wTw = Math.max(300, pageWTw - xTw - 20);
+
+      frames.push(new Paragraph({
+        frame: {
+          type: 'absolute',
+          position: { x: xTw, y: Math.max(0, Math.round((sg.y - size * 0.96) * 20)) },
+          width: wTw,
+          height: lineH,
+          anchor: { horizontal: FrameAnchorType.PAGE, vertical: FrameAnchorType.PAGE }
+        },
+        spacing: { before: 0, after: 0, line: lineH, lineRule: LineRuleType.EXACT },
+        children: [new TextRun({ text: sg.text, size: Math.round(size * 2), color, font: 'Arial' })]
+      }));
+    }
+
+    // Foto dipasang sebagai gambar tersendiri (bisa diganti di Word)
+    const photoRuns = [];
+    if (xP) {
+      let z = 5;
+      for (const ph of photos) {
+        const bx0 = ph.b.x0 * S, by0 = ph.b.y0 * S;
+        const bw = (ph.b.x1 - ph.b.x0) * S, bh = (ph.b.y1 - ph.b.y0) * S;
+        const cb = {
+          x0: Math.max(0, Math.floor(bx0)), y0: Math.max(0, Math.floor(by0)),
+          x1: Math.min(cw, Math.ceil(bx0 + bw)), y1: Math.min(ch, Math.ceil(by0 + bh))
+        };
+        const V = visibleBox(xP, xB, cb);
+        if (!V) continue; // foto tidak terpisah dari latar: biarkan menyatu dengan latar
+        const fr = [(V.x0 - bx0) / bw, (V.y0 - by0) / bh, (V.x1 - bx0) / bw, (V.y1 - by0) / bh]
+          .map(v => Math.min(1, Math.max(0, v)));
+        const out = await cropEncode(ph.src, fr, 1400);
+        photoRuns.push(new ImageRun({
+          type: out.type,
+          data: out.bytes,
+          transformation: {
+            width: Math.max(1, Math.round((V.x1 - V.x0) / S * 96 / 72)),
+            height: Math.max(1, Math.round((V.y1 - V.y0) / S * 96 / 72))
+          },
+          floating: {
+            horizontalPosition: { relative: HorizontalPositionRelativeFrom.PAGE, offset: Math.round(V.x0 / S * 12700) },
+            verticalPosition: { relative: VerticalPositionRelativeFrom.PAGE, offset: Math.round(V.y0 / S * 12700) },
+            behindDocument: true,
+            allowOverlap: true,
+            zIndex: z++
+          }
+        }));
+      }
+    }
+    for (const ph of photos) ph.src.width = ph.src.height = 0;
+
+    const jpg = await new Promise(res => xB.canvas.toBlob(res, 'image/jpeg', 0.92));
+    const bytes = new Uint8Array(await jpg.arrayBuffer());
+    xT.canvas.width = xT.canvas.height = 0;
+    xB.canvas.width = xB.canvas.height = 0;
+    if (xP) xP.canvas.width = xP.canvas.height = 0;
+
+    const imgPara = new Paragraph({
+      children: [new ImageRun({
+        type: 'jpg',
+        data: bytes,
+        transformation: { width: Math.round(base.width * 96 / 72), height: Math.round(base.height * 96 / 72) },
+        floating: {
+          horizontalPosition: { relative: HorizontalPositionRelativeFrom.PAGE, offset: 0 },
+          verticalPosition: { relative: VerticalPositionRelativeFrom.PAGE, offset: 0 },
+          behindDocument: true
+        }
+      })]
+    });
+
+    sections.push({
+      properties: {
+        page: {
+          size: { width: pageWTw, height: Math.round(base.height * 20) },
+          margin: { top: 0, right: 0, bottom: 0, left: 0, header: 0, footer: 0 }
+        }
+      },
+      children: [...frames, imgPara, ...(photoRuns.length ? [new Paragraph({ children: photoRuns })] : [])]
+    });
+
+    bar.value = Math.round((p / pdf.numPages) * 90);
+    await new Promise(r => setTimeout(r));
+  }
+
+  setStatus('Menyusun dokumen Word...');
+  return Packer.toBlob(new Document({ sections }));
+}
+
+// Kelompokkan potongan teks PDF menjadi baris
+function extractLines(items) {
+  const toks = items
+    .filter(i => i.str !== undefined && i.str.trim() !== '' || i.str === ' ')
+    .map(i => ({ s: i.str, x: i.transform[4], y: i.transform[5], size: Math.hypot(i.transform[0], i.transform[1]) || i.height, w: i.width }));
+  toks.sort((a, b) => (Math.abs(b.y - a.y) > 2 ? b.y - a.y : a.x - b.x));
+
+  const lines = [];
+  for (const t of toks) {
+    const last = lines[lines.length - 1];
+    if (last && Math.abs(last.y - t.y) < Math.max(t.size, last.size) * 0.5) {
+      const gap = t.x - last.endX;
+      const needSpace = gap > t.size * 0.15 && !last.text.endsWith(' ') && !t.s.startsWith(' ');
+      last.text += (needSpace ? ' ' : '') + t.s;
+      last.endX = t.x + t.w;
+      last.size = Math.max(last.size, t.size);
+    } else {
+      lines.push({ text: t.s, y: t.y, x: t.x, endX: t.x + t.w, size: t.size });
+    }
+  }
+  lines.forEach(l => l.text = l.text.replace(/\s+/g, ' ').trim());
+  return lines.filter(l => l.text);
+}
+
+// Ubah baris menjadi blok: judul atau paragraf
+function buildBlocks(pages) {
+  const sizes = pages.flat().map(l => l.size).sort((a, b) => a - b);
+  const median = sizes[Math.floor(sizes.length / 2)] || 12;
+  const blocks = [];
+  for (const lines of pages) {
+    let prev = null;
+    for (const l of lines) {
+      const ratio = l.size / median;
+      const isHeading = ratio > 1.2 && l.text.length < 120;
+      if (isHeading) {
+        blocks.push({ type: ratio > 1.6 ? 'h1' : 'h2', text: l.text });
+        prev = null;
+        continue;
+      }
+      const last = blocks[blocks.length - 1];
+      const joinable = prev && last && last.type === 'p' && (prev.y - l.y) < l.size * 1.8 && (prev.y - l.y) > 0;
+      if (joinable) {
+        last.text += (last.text.endsWith('-') ? '' : ' ') + l.text;
+      } else {
+        blocks.push({ type: 'p', text: l.text });
+      }
+      prev = l;
+    }
+  }
+  return blocks;
+}
+
+async function makeDocx(blocks) {
+  const { Document, Packer, Paragraph, TextRun, HeadingLevel } = docx;
+  const children = blocks.map(b => {
+    if (b.type === 'h1') return new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun(b.text)] });
+    if (b.type === 'h2') return new Paragraph({ heading: HeadingLevel.HEADING_2, children: [new TextRun(b.text)] });
+    return new Paragraph({ spacing: { after: 160 }, children: [new TextRun(b.text)] });
+  });
+  const doc = new Document({ sections: [{ children }] });
+  return Packer.toBlob(doc);
+}
+
+// Status koneksi + PWA
+function updateNet() { $('net').textContent = navigator.onLine ? 'Mode: online' : 'Mode: offline (tetap bisa dipakai)'; }
+addEventListener('online', updateNet); addEventListener('offline', updateNet); updateNet();
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+
+let deferred;
+addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferred = e; $('install').style.display = 'block'; });
+$('install').addEventListener('click', async () => { if (deferred) { deferred.prompt(); deferred = null; $('install').style.display = 'none'; } });
+</script>
+</body>
+</html>
